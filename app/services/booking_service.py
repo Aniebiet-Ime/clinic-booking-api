@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Booking, BookingAttempt, IdempotencyRecord, Slot
 from app.schemas import BookingCreate
-from app.services.idempotency import get_idempotency_record, request_fingerprint, store_idempotency_response
+from app.services.idempotency import acquire_idempotency_lock, get_idempotency_record, request_fingerprint, store_idempotency_response
 from app.services.rate_limiter import can_attempt_booking, record_booking_attempt
 
 
@@ -105,38 +105,36 @@ def get_booking_by_id(db: Session, booking_id: str) -> Booking | None:
     return db.get(Booking, booking_id)
 
 
+def _normalize_idempotency_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
 def create_booking(db: Session, payload: BookingCreate, idempotency_key: str | None = None) -> dict[str, Any]:
+    response_body, _ = create_booking_result(db, payload, idempotency_key=idempotency_key)
+    return response_body
+
+
+def create_booking_result(db: Session, payload: BookingCreate, idempotency_key: str | None = None) -> tuple[dict[str, Any], int]:
     name = payload.name.strip()
     email = payload.email.strip().lower()
     fingerprint = request_fingerprint(payload.model_dump(mode="json"))
+    key = _normalize_idempotency_key(idempotency_key)
 
-    if idempotency_key:
-        key = idempotency_key.strip()
+    if key:
+        acquire_idempotency_lock(db, key)
         existing = get_idempotency_record(db, key)
         if existing is not None:
             if existing.request_fingerprint != fingerprint:
                 raise HTTPException(status_code=422, detail="Idempotency key reused with a different request body")
-            return json.loads(existing.response_body)
+            if existing.response_status in (None, 0) or not existing.response_body:
+                raise HTTPException(status_code=500, detail="Idempotency response is still being finalized")
+            return json.loads(existing.response_body), int(existing.response_status)
 
-        try:
-            record = IdempotencyRecord(
-                id=f"idem-{uuid.uuid4().hex[:12]}",
-                idempotency_key=key,
-                request_fingerprint=fingerprint,
-                response_body="{}",
-                response_status=500,
-            )
-            db.add(record)
-            db.flush()
-        except IntegrityError:
-            db.rollback()
-            existing = get_idempotency_record(db, key)
-            if existing is not None:
-                if existing.request_fingerprint != fingerprint:
-                    raise HTTPException(status_code=422, detail="Idempotency key reused with a different request body")
-                return json.loads(existing.response_body)
-            raise
-
+    allowed = True
+    retry_after = 0
     allowed, retry_after = can_attempt_booking(db, email)
     if not allowed:
         raise HTTPException(
@@ -144,53 +142,81 @@ def create_booking(db: Session, payload: BookingCreate, idempotency_key: str | N
             detail="Too many booking attempts for this email; please retry later.",
             headers={"Retry-After": str(retry_after)},
         )
+
     record_booking_attempt(db, email)
-
-    slot = db.get(Slot, payload.slot_id)
-    if slot is None:
-        raise HTTPException(status_code=404, detail="Slot not found")
-    slot_start = ensure_utc(slot.start) or slot.start
-    if slot_start <= datetime.now(timezone.utc):
-        raise HTTPException(status_code=400, detail="Slot has already started")
-
-    existing_confirmed = db.execute(
-        select(Booking.id).where(and_(Booking.slot_id == slot.id, Booking.status == "confirmed"))
-    ).scalar_one_or_none()
-    if existing_confirmed is not None:
-        raise HTTPException(status_code=409, detail="Slot is already booked")
-
-    booking = Booking(
-        id=f"booking-{uuid.uuid4().hex[:8]}",
-        slot_id=slot.id,
-        name=name,
-        email=email,
-        status="confirmed",
-        created_at=datetime.now(timezone.utc),
-    )
-    db.add(booking)
-    db.flush()
-
-    response_body = serialize_booking(booking)
-    if idempotency_key:
-        record = get_idempotency_record(db, idempotency_key.strip())
-        if record is not None:
-            store_idempotency_response(db, record, response_body, 201)
+    db.commit()
 
     try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="Slot is already booked")
+        with db.begin():
+            if key:
+                acquire_idempotency_lock(db, key)
+                existing = get_idempotency_record(db, key)
+                if existing is not None:
+                    if existing.request_fingerprint != fingerprint:
+                        raise HTTPException(status_code=422, detail="Idempotency key reused with a different request body")
+                    if existing.response_status in (None, 0) or not existing.response_body:
+                        raise HTTPException(status_code=500, detail="Idempotency response is still being finalized")
+                    return json.loads(existing.response_body), int(existing.response_status)
 
-    if idempotency_key:
-        record = get_idempotency_record(db, idempotency_key.strip())
-        if record is not None:
-            record.response_body = json.dumps(response_body, separators=(",", ":"), ensure_ascii=True)
-            record.response_status = 201
-            db.add(record)
-            db.commit()
-            response_body = json.loads(record.response_body)
-    return response_body
+                record = IdempotencyRecord(
+                    id=f"idem-{uuid.uuid4().hex[:12]}",
+                    idempotency_key=key,
+                    request_fingerprint=fingerprint,
+                    response_body="",
+                    response_status=0,
+                )
+                db.add(record)
+                db.flush()
+
+            slot = db.get(Slot, payload.slot_id)
+            if slot is None:
+                raise HTTPException(status_code=404, detail="Slot not found")
+
+            slot_start = ensure_utc(slot.start) or slot.start
+            if slot_start <= datetime.now(timezone.utc):
+                raise HTTPException(status_code=400, detail="Slot has already started")
+
+            existing_confirmed = db.execute(
+                select(Booking.id).where(and_(Booking.slot_id == slot.id, Booking.status == "confirmed"))
+            ).scalar_one_or_none()
+            if existing_confirmed is not None:
+                raise HTTPException(status_code=409, detail="Slot is already booked")
+
+            booking = Booking(
+                id=f"booking-{uuid.uuid4().hex[:8]}",
+                slot_id=slot.id,
+                name=name,
+                email=email,
+                status="confirmed",
+                created_at=datetime.now(timezone.utc),
+            )
+            db.add(booking)
+            db.flush()
+            response_body = serialize_booking(booking)
+
+            if key:
+                record = get_idempotency_record(db, key)
+                if record is None:
+                    raise HTTPException(status_code=500, detail="Idempotency record missing after booking creation")
+                store_idempotency_response(db, record, response_body, 201)
+
+            return response_body, 201
+    except HTTPException:
+        raise
+    except IntegrityError:
+        if key:
+            try:
+                existing = get_idempotency_record(db, key)
+                if existing is not None:
+                    if existing.request_fingerprint != fingerprint:
+                        raise HTTPException(status_code=422, detail="Idempotency key reused with a different request body")
+                    if existing.response_body and existing.response_status not in (None, 0):
+                        return json.loads(existing.response_body), int(existing.response_status)
+            finally:
+                db.rollback()
+        else:
+            db.rollback()
+        raise HTTPException(status_code=409, detail="Slot is already booked")
 
 
 def list_bookings_by_email(db: Session, email: str, limit: int = 10, cursor: str | None = None) -> dict[str, Any]:

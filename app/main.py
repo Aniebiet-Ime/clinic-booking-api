@@ -53,7 +53,11 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
         message = detail[0].get("msg", "Request failed") if detail and isinstance(detail[0], dict) else "Request failed"
     else:
         message = str(detail) if detail else "Request failed"
-    return JSONResponse(status_code=exc.status_code, content={"error": message})
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": message},
+        headers=getattr(exc, "headers", None) or {},
+    )
 
 
 @app.exception_handler(Exception)

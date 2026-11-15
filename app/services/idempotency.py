@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.models import IdempotencyRecord
@@ -14,11 +14,20 @@ def request_fingerprint(payload: Any) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def acquire_idempotency_lock(db: Session, key: str) -> None:
+    if not key:
+        return
+    if getattr(db.bind, "dialect", None) is not None and db.bind.dialect.name == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": key})
+
+
 def get_idempotency_record(db: Session, key: str):
     if not key:
         return None
     return db.execute(
-        select(IdempotencyRecord).where(IdempotencyRecord.idempotency_key == key)
+        select(IdempotencyRecord)
+        .where(IdempotencyRecord.idempotency_key == key)
+        .with_for_update()
     ).scalar_one_or_none()
 
 

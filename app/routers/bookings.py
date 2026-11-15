@@ -1,24 +1,32 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.dependencies import require_api_key
 from app.schemas import BookingCreate, BookingHistoryResponse, BookingResponse
-from app.services.booking_service import cancel_booking, create_booking, get_booking_by_id, list_bookings_by_email, serialize_booking
+from app.services.booking_service import (
+    cancel_booking,
+    create_booking_result,
+    get_booking_by_id,
+    list_bookings_by_email,
+    serialize_booking,
+)
 
 router = APIRouter(tags=["bookings"])
 
 
-@router.post("/bookings", status_code=status.HTTP_201_CREATED)
+@router.post("/bookings")
 def create_booking_endpoint(
     payload: BookingCreate,
     db: Session = Depends(get_db),
     _api_key: str = Depends(require_api_key),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
-    return create_booking(db, payload, idempotency_key=idempotency_key)
+    response_body, status_code = create_booking_result(db, payload, idempotency_key=idempotency_key)
+    return JSONResponse(content=response_body, status_code=status_code)
 
 
 @router.get("/bookings/{booking_id}")

@@ -61,8 +61,8 @@ class IdempotencyRecord(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: f"idem-{uuid.uuid4().hex[:12]}")
     idempotency_key: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
     request_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
-    response_body: Mapped[str] = mapped_column(Text, nullable=False)
-    response_status: Mapped[int] = mapped_column(Integer, nullable=False)
+    response_body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    response_status: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

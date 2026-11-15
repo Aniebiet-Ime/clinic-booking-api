@@ -62,23 +62,47 @@ function clearConfirmation() {
   confirmationPanel.hidden = true;
 }
 
+function buildEmptyState(messageText) {
+  const item = document.createElement('div');
+  item.className = 'history-item';
+  item.textContent = messageText;
+  return item;
+}
+
 function renderSlots(slots) {
-  slotContainer.innerHTML = '';
-  slotSelect.innerHTML = '<option value="">Select a slot</option>';
+  slotContainer.replaceChildren();
+  slotSelect.replaceChildren();
+
+  const defaultOption = document.createElement('option');
+  defaultOption.value = '';
+  defaultOption.textContent = 'Select a slot';
+  slotSelect.appendChild(defaultOption);
+
   const providers = new Set();
 
   for (const slot of slots) {
     providers.add(slot.provider);
     const card = document.createElement('article');
     card.className = `slot-card ${slot.available ? 'available' : 'unavailable'}`;
-    card.innerHTML = `
-      <div class="slot-top">
-        <span class="badge ${slot.available ? 'available' : 'unavailable'}">${slot.available ? 'Available' : 'Booked'}</span>
-      </div>
-      <h3>${slot.provider}</h3>
-      <p>${formatDate(slot.start)}</p>
-      <p>${formatTime(slot.start)} - ${formatTime(slot.end)}</p>
-    `;
+
+    const slotTop = document.createElement('div');
+    slotTop.className = 'slot-top';
+
+    const badge = document.createElement('span');
+    badge.className = `badge ${slot.available ? 'available' : 'unavailable'}`;
+    badge.textContent = slot.available ? 'Available' : 'Booked';
+    slotTop.appendChild(badge);
+
+    const title = document.createElement('h3');
+    title.textContent = slot.provider;
+
+    const dateText = document.createElement('p');
+    dateText.textContent = formatDate(slot.start);
+
+    const timeText = document.createElement('p');
+    timeText.textContent = `${formatTime(slot.start)} - ${formatTime(slot.end)}`;
+
+    card.append(slotTop, title, dateText, timeText);
 
     if (slot.available) {
       const button = document.createElement('button');
@@ -94,12 +118,20 @@ function renderSlots(slots) {
 
     const option = document.createElement('option');
     option.value = slot.id;
+    option.dataset.provider = slot.provider;
+    option.dataset.start = slot.start;
+    option.dataset.end = slot.end;
     option.textContent = `${slot.provider} — ${formatDate(slot.start)} ${formatTime(slot.start)}`;
     option.disabled = !slot.available;
     slotSelect.appendChild(option);
   }
 
-  providerFilter.innerHTML = '<option value="">All providers</option>';
+  providerFilter.replaceChildren();
+  const allProvidersOption = document.createElement('option');
+  allProvidersOption.value = '';
+  allProvidersOption.textContent = 'All providers';
+  providerFilter.appendChild(allProvidersOption);
+
   for (const provider of [...providers].sort()) {
     const option = document.createElement('option');
     option.value = provider;
@@ -145,13 +177,16 @@ form.addEventListener('submit', async (event) => {
       email: document.querySelector('#patient-email').value.trim(),
     };
     const booking = await api.createBooking(payload);
+    const selectedSlot = document.querySelector('#slot-select').selectedOptions[0];
+    const slotStart = selectedSlot?.dataset.start ? new Date(selectedSlot.dataset.start) : null;
+    const slotEnd = selectedSlot?.dataset.end ? new Date(selectedSlot.dataset.end) : null;
+
     showMessage('Booking confirmed successfully.', 'success');
     document.querySelector('#booking-id').textContent = booking.id;
     document.querySelector('#booking-name').textContent = booking.name;
-    const provider = document.querySelector('#slot-select').selectedOptions[0]?.textContent || 'Provider';
-    document.querySelector('#booking-provider').textContent = provider.split('—')[0].trim();
-    document.querySelector('#booking-date').textContent = formatDate(booking.created_at);
-    document.querySelector('#booking-time').textContent = formatTime(booking.created_at);
+    document.querySelector('#booking-provider').textContent = selectedSlot?.dataset.provider || 'Unknown provider';
+    document.querySelector('#booking-date').textContent = slotStart ? formatDate(slotStart.toISOString()) : '—';
+    document.querySelector('#booking-time').textContent = slotStart && slotEnd ? `${formatTime(slotStart.toISOString())} - ${formatTime(slotEnd.toISOString())}` : '—';
     document.querySelector('#booking-status').textContent = booking.status;
     confirmationPanel.hidden = false;
     form.reset();
@@ -168,26 +203,40 @@ historyForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const email = document.querySelector('#history-email').value.trim();
   if (!email) return;
+
   try {
     const bookings = await api.getHistory(email);
-    historyResults.innerHTML = '';
+    historyResults.replaceChildren();
+
     if (!bookings.length) {
-      historyResults.innerHTML = '<div class="history-item">No bookings found for this email.</div>';
+      historyResults.appendChild(buildEmptyState('No bookings found for this email.'));
       return;
     }
 
     for (const booking of bookings) {
       const item = document.createElement('div');
       item.className = 'history-item';
-      item.innerHTML = `
-        <strong>${booking.name} — ${booking.status}</strong>
-        <div>${formatDate(booking.created_at)} at ${formatTime(booking.created_at)}</div>
-        <div>Provider: ${booking.slot_id}</div>
-      `;
+
+      const title = document.createElement('strong');
+      title.textContent = `${booking.name} — ${booking.status}`;
+      item.appendChild(title);
+
+      const dateLine = document.createElement('div');
+      const historyDate = booking.start || booking.created_at;
+      dateLine.textContent = historyDate ? `${formatDate(historyDate)} at ${formatTime(historyDate)}` : 'Appointment date unavailable';
+      item.appendChild(dateLine);
+
+      const providerLine = document.createElement('div');
+      providerLine.textContent = `Provider: ${booking.provider || booking.slot_id}`;
+      item.appendChild(providerLine);
+
       historyResults.appendChild(item);
     }
   } catch (error) {
-    historyResults.innerHTML = `<div class="history-item">${error.message}</div>`;
+    const message = document.createElement('div');
+    message.className = 'history-item';
+    message.textContent = error.message;
+    historyResults.replaceChildren(message);
   }
 });
 
