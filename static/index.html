@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Koya Clinic</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand-wrap">
+        <div class="logo">K</div>
+        <div>
+          <p class="brand-name">Koya Clinic</p>
+          <p class="brand-tag">Primary & preventive care</p>
+        </div>
+      </div>
+      <nav>
+        <a href="#appointments">Appointments</a>
+        <a href="#booking">Book</a>
+        <a href="#history">History</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Compassionate care, made simple</p>
+          <h1>Book your next appointment with ease.</h1>
+          <p>
+            Trusted clinicians, flexible consultation times, and a seamless patient experience built around your schedule.
+          </p>
+          <a class="cta" href="#booking">Book an appointment</a>
+        </div>
+        <div class="hero-panel" aria-label="Healthcare illustration">
+          <div class="panel-card">
+            <span>Next available</span>
+            <strong id="next-slot">Loading…</strong>
+          </div>
+        </div>
+      </section>
+
+      <section id="appointments" class="section">
+        <div class="section-header">
+          <h2>Available appointments</h2>
+          <label>
+            <span>Filter by provider</span>
+            <select id="provider-filter">
+              <option value="">All providers</option>
+            </select>
+          </label>
+        </div>
+        <div id="slots-container" class="slot-grid"></div>
+      </section>
+
+      <section id="booking" class="section booking-section">
+        <div class="booking-panel">
+          <h2>Book a consultation</h2>
+          <form id="booking-form">
+            <label>
+              <span>Full name</span>
+              <input id="patient-name" name="name" type="text" required />
+            </label>
+            <label>
+              <span>Email address</span>
+              <input id="patient-email" name="email" type="email" required />
+            </label>
+            <label>
+              <span>Appointment</span>
+              <select id="slot-select" name="slot_id" required>
+                <option value="">Select a slot</option>
+              </select>
+            </label>
+            <button type="submit" id="submit-btn">Confirm booking</button>
+          </form>
+          <p id="form-message" class="message" aria-live="polite"></p>
+        </div>
+
+        <div class="confirmation-panel" id="confirmation-panel" hidden>
+          <h3>Booking confirmed</h3>
+          <ul>
+            <li><strong>Reference:</strong> <span id="booking-id"></span></li>
+            <li><strong>Patient:</strong> <span id="booking-name"></span></li>
+            <li><strong>Provider:</strong> <span id="booking-provider"></span></li>
+            <li><strong>Date:</strong> <span id="booking-date"></span></li>
+            <li><strong>Time:</strong> <span id="booking-time"></span></li>
+            <li><strong>Status:</strong> <span id="booking-status"></span></li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="history" class="section">
+        <div class="section-header history-header">
+          <h2>Patient booking history</h2>
+          <form id="history-form" class="history-form">
+            <label>
+              <span>Email</span>
+              <input id="history-email" type="email" placeholder="patient@example.com" required />
+            </label>
+            <button type="submit">Look up</button>
+          </form>
+        </div>
+        <div id="history-results" class="history-list"></div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
