@@ -16,7 +16,8 @@ from app.routers.ui import router as ui_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
+    if settings.ENVIRONMENT.lower() != "production":
+        init_db()
     yield
 
 

@@ -29,4 +29,6 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
+    if settings.ENVIRONMENT.lower() == "production":
+        return
     Base.metadata.create_all(bind=engine)

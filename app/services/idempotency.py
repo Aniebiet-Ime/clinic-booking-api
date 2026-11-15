@@ -31,6 +31,20 @@ def get_idempotency_record(db: Session, key: str):
     ).scalar_one_or_none()
 
 
+def delete_incomplete_idempotency_record(db: Session, key: str) -> None:
+    if not key:
+        return
+    record = get_idempotency_record(db, key)
+    if record is not None and record.response_status in (None, 0) and not record.response_body:
+        db.delete(record)
+        db.flush()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+
 def store_idempotency_response(db: Session, record: IdempotencyRecord, response_body: dict, status_code: int) -> None:
     record.response_body = json.dumps(response_body, separators=(",", ":"), ensure_ascii=True)
     record.response_status = status_code

@@ -90,7 +90,7 @@ def test_idempotency_rejects_mismatched_payload(client):
     assert second.status_code == 422
 
 
-def test_incomplete_idempotency_record_is_rejected(client):
+def test_incomplete_idempotency_record_is_rejected(client, monkeypatch):
     from app.database import SessionLocal
 
     from app.services.idempotency import request_fingerprint
@@ -107,6 +107,11 @@ def test_incomplete_idempotency_record_is_rejected(client):
         session.add(record)
         session.commit()
 
+        def fail_after_booking(*args, **kwargs):
+            raise RuntimeError("simulated database failure")
+
+        monkeypatch.setattr("app.services.booking_service.store_idempotency_response", fail_after_booking)
+
         headers = {"X-API-Key": "test-api-key"}
         response = client.post(
             "/bookings",
@@ -114,5 +119,10 @@ def test_incomplete_idempotency_record_is_rejected(client):
             headers={**headers, "Idempotency-Key": "incomplete-key"},
         )
         assert response.status_code == 500
+
+        remaining = session.execute(
+            __import__("sqlalchemy").sql.select(IdempotencyRecord).where(IdempotencyRecord.idempotency_key == "incomplete-key")
+        ).scalar_one_or_none()
+        assert remaining is None
     finally:
         session.close()

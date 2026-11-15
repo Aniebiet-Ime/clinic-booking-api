@@ -1,9 +1,14 @@
+import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from fastapi import HTTPException
 
 from app.database import Base, SessionLocal, engine
 from app.models import BookingAttempt
+from app.schemas import BookingCreate
+from app.services.booking_service import create_booking_result
 from app.services.rate_limiter import RATE_LIMIT_MAX_ATTEMPTS, RATE_LIMIT_WINDOW_SECONDS, can_attempt_booking
 
 
@@ -82,8 +87,47 @@ def test_expired_attempts_no_longer_count_towards_limit():
 
 
 @pytest.mark.skipif(
-    False,
-    reason="Concurrency-limited tests are covered in PostgreSQL-only integration suite.",
+    os.getenv("DATABASE_URL", "").startswith("sqlite"),
+    reason="PostgreSQL is required for transactional rate-limit contention tests.",
 )
-def test_concurrent_requests_cannot_bypass_limit():
-    pass
+def test_concurrent_requests_cannot_bypass_limit(client):
+    headers = {"X-API-Key": "test-api-key"}
+    slots = [
+        {"id": f"rate-concurrent-{index}", "provider": f"Dr. Concurrency {index}", "start": f"2030-12-{(index + 1):02d}T09:00:00Z", "end": f"2030-12-{(index + 1):02d}T09:30:00Z"}
+        for index in range(1, 11)
+    ]
+    response = client.post("/reset", json={"slots": slots}, headers=headers)
+    assert response.status_code == 200
+
+    email = "Concurrent.User@Example.com"
+
+    def attempt(slot_id: str):
+        db = SessionLocal()
+        try:
+            payload = BookingCreate(slot_id=slot_id, name="Concurrent User", email=email)
+            try:
+                _, status = create_booking_result(db, payload)
+                return ("ok", status)
+            except HTTPException as exc:
+                return ("blocked", exc.status_code, exc.headers.get("Retry-After") if exc.headers else None)
+        finally:
+            db.close()
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        results = list(pool.map(attempt, [f"rate-concurrent-{i}" for i in range(1, 11)]))
+
+    successes = sum(1 for result in results if result[0] == "ok")
+    blocked = [result for result in results if result[0] == "blocked"]
+    assert successes <= RATE_LIMIT_MAX_ATTEMPTS
+    assert blocked
+    assert all(result[1] == 429 for result in blocked)
+    assert all(isinstance(result[2], str) and result[2].isdigit() for result in blocked)
+
+    different_email = "other.user@example.com"
+    db = SessionLocal()
+    try:
+        allowed, retry_after = can_attempt_booking(db, different_email)
+        assert allowed is True
+        assert retry_after == 0
+    finally:
+        db.close()

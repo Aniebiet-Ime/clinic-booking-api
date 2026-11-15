@@ -13,7 +13,13 @@ from sqlalchemy.orm import Session
 
 from app.models import Booking, BookingAttempt, IdempotencyRecord, Slot
 from app.schemas import BookingCreate
-from app.services.idempotency import acquire_idempotency_lock, get_idempotency_record, request_fingerprint, store_idempotency_response
+from app.services.idempotency import (
+    acquire_idempotency_lock,
+    delete_incomplete_idempotency_record,
+    get_idempotency_record,
+    request_fingerprint,
+    store_idempotency_response,
+)
 from app.services.rate_limiter import can_attempt_booking, record_booking_attempt
 
 
@@ -130,6 +136,7 @@ def create_booking_result(db: Session, payload: BookingCreate, idempotency_key: 
             if existing.request_fingerprint != fingerprint:
                 raise HTTPException(status_code=422, detail="Idempotency key reused with a different request body")
             if existing.response_status in (None, 0) or not existing.response_body:
+                delete_incomplete_idempotency_record(db, key)
                 raise HTTPException(status_code=500, detail="Idempotency response is still being finalized")
             return json.loads(existing.response_body), int(existing.response_status)
 
@@ -202,9 +209,14 @@ def create_booking_result(db: Session, payload: BookingCreate, idempotency_key: 
 
             return response_body, 201
     except HTTPException:
+        db.rollback()
+        if key:
+            delete_incomplete_idempotency_record(db, key)
         raise
     except IntegrityError:
+        db.rollback()
         if key:
+            delete_incomplete_idempotency_record(db, key)
             try:
                 existing = get_idempotency_record(db, key)
                 if existing is not None:
@@ -217,6 +229,11 @@ def create_booking_result(db: Session, payload: BookingCreate, idempotency_key: 
         else:
             db.rollback()
         raise HTTPException(status_code=409, detail="Slot is already booked")
+    except Exception:
+        db.rollback()
+        if key:
+            delete_incomplete_idempotency_record(db, key)
+        raise
 
 
 def list_bookings_by_email(db: Session, email: str, limit: int = 10, cursor: str | None = None) -> dict[str, Any]:
