@@ -1,14 +1,12 @@
-import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
-import pytest
-from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
-from app.database import Base, SessionLocal, engine
+from app.database import SessionLocal
+from app.main import app
 from app.models import BookingAttempt
-from app.schemas import BookingCreate
-from app.services.booking_service import create_booking_result
 from app.services.rate_limiter import RATE_LIMIT_MAX_ATTEMPTS, RATE_LIMIT_WINDOW_SECONDS, can_attempt_booking
 
 
@@ -65,11 +63,52 @@ def test_failed_attempts_and_different_emails_are_isolated(client):
     assert response.status_code == 201
 
 
+def test_failed_booking_attempts_count_with_normalized_email(client):
+    headers = {"X-API-Key": "test-api-key"}
+    response = client.post(
+        "/reset",
+        json={
+            "slots": [
+                {
+                    "id": "rate-after-failures",
+                    "provider": "Dr. Recovery",
+                    "start": "2030-12-22T09:00:00Z",
+                    "end": "2030-12-22T09:30:00Z",
+                }
+            ]
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+
+    for _ in range(RATE_LIMIT_MAX_ATTEMPTS):
+        failed = client.post(
+            "/bookings",
+            json={
+                "slot_id": "missing-slot",
+                "name": "Failed Patient",
+                "email": "Failed.User@Example.com",
+            },
+            headers=headers,
+        )
+        assert failed.status_code == 404
+
+    blocked = client.post(
+        "/bookings",
+        json={
+            "slot_id": "rate-after-failures",
+            "name": "Failed Patient",
+            "email": "failed.user@example.com",
+        },
+        headers=headers,
+    )
+    assert blocked.status_code == 429
+    assert re.fullmatch(r"[0-9]+", blocked.headers["Retry-After"])
+
+
 def test_expired_attempts_no_longer_count_towards_limit():
-    Base.metadata.create_all(bind=engine)
     session = SessionLocal()
     try:
-        session.query(BookingAttempt).delete()
         now = datetime.now(timezone.utc)
         session.add_all(
             [
@@ -86,15 +125,11 @@ def test_expired_attempts_no_longer_count_towards_limit():
         session.close()
 
 
-@pytest.mark.skipif(
-    os.getenv("DATABASE_URL", "").startswith("sqlite"),
-    reason="PostgreSQL is required for transactional rate-limit contention tests.",
-)
 def test_concurrent_requests_cannot_bypass_limit(client):
     headers = {"X-API-Key": "test-api-key"}
     slots = [
-        {"id": f"rate-concurrent-{index}", "provider": f"Dr. Concurrency {index}", "start": f"2030-12-{(index + 1):02d}T09:00:00Z", "end": f"2030-12-{(index + 1):02d}T09:30:00Z"}
-        for index in range(1, 11)
+        {"id": f"rate-concurrent-{index}", "provider": f"Dr. Concurrency {index}", "start": f"2030-12-{index:02d}T09:00:00Z", "end": f"2030-12-{index:02d}T09:30:00Z"}
+        for index in range(1, 12)
     ]
     response = client.post("/reset", json={"slots": slots}, headers=headers)
     assert response.status_code == 200
@@ -102,32 +137,32 @@ def test_concurrent_requests_cannot_bypass_limit(client):
     email = "Concurrent.User@Example.com"
 
     def attempt(slot_id: str):
-        db = SessionLocal()
-        try:
-            payload = BookingCreate(slot_id=slot_id, name="Concurrent User", email=email)
-            try:
-                _, status = create_booking_result(db, payload)
-                return ("ok", status)
-            except HTTPException as exc:
-                return ("blocked", exc.status_code, exc.headers.get("Retry-After") if exc.headers else None)
-        finally:
-            db.close()
+        request_client = TestClient(app)
+        return request_client.post(
+            "/bookings",
+            json={"slot_id": slot_id, "name": "Concurrent User", "email": email},
+            headers=headers,
+        )
 
     with ThreadPoolExecutor(max_workers=10) as pool:
         results = list(pool.map(attempt, [f"rate-concurrent-{i}" for i in range(1, 11)]))
 
-    successes = sum(1 for result in results if result[0] == "ok")
-    blocked = [result for result in results if result[0] == "blocked"]
-    assert successes <= RATE_LIMIT_MAX_ATTEMPTS
-    assert blocked
-    assert all(result[1] == 429 for result in blocked)
-    assert all(isinstance(result[2], str) and result[2].isdigit() for result in blocked)
+    statuses = [result.status_code for result in results]
+    assert statuses.count(201) == RATE_LIMIT_MAX_ATTEMPTS
+    assert statuses.count(429) == 10 - RATE_LIMIT_MAX_ATTEMPTS
+    for result in results:
+        if result.status_code == 429:
+            retry_after = result.headers.get("Retry-After", "")
+            assert re.fullmatch(r"[0-9]+", retry_after)
+            assert int(retry_after) > 0
 
-    different_email = "other.user@example.com"
-    db = SessionLocal()
-    try:
-        allowed, retry_after = can_attempt_booking(db, different_email)
-        assert allowed is True
-        assert retry_after == 0
-    finally:
-        db.close()
+    independent = client.post(
+        "/bookings",
+        json={
+            "slot_id": "rate-concurrent-11",
+            "name": "Independent User",
+            "email": "other.user@example.com",
+        },
+        headers=headers,
+    )
+    assert independent.status_code == 201

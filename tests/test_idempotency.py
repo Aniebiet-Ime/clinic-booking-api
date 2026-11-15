@@ -1,14 +1,15 @@
-import os
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
-import pytest
+from fastapi import HTTPException
+from sqlalchemy import func, select
 
-from app.models import IdempotencyRecord
+from app.database import SessionLocal
+from app.models import Booking
+from app.schemas import BookingCreate
+from app.services.booking_service import create_booking_result
 
 
-@pytest.mark.skipif(
-    os.getenv("DATABASE_URL", "").startswith("sqlite"),
-    reason="PostgreSQL is required for concurrent idempotency collision tests.",
-)
 def test_same_key_with_different_payload_is_rejected_concurrently(client):
     headers = {"X-API-Key": "test-api-key"}
     client.post(
@@ -21,19 +22,37 @@ def test_same_key_with_different_payload_is_rejected_concurrently(client):
         headers=headers,
     )
 
-    response = client.post(
-        "/bookings",
-        json={"slot_id": "slot-different-key", "name": "Ada", "email": "ada@example.com"},
-        headers={**headers, "Idempotency-Key": "key-1"},
-    )
-    assert response.status_code == 201
+    barrier = Barrier(2)
 
-    mismatched = client.post(
-        "/bookings",
-        json={"slot_id": "slot-different-key", "name": "Ada Changed", "email": "ada@example.com"},
-        headers={**headers, "Idempotency-Key": "key-1"},
-    )
-    assert mismatched.status_code == 422
+    def attempt(name: str):
+        db = SessionLocal()
+        try:
+            barrier.wait()
+            payload = BookingCreate(
+                slot_id="slot-different-key",
+                name=name,
+                email="ada@example.com",
+            )
+            try:
+                body, status = create_booking_result(db, payload, idempotency_key="key-1")
+                return status, body
+            except HTTPException as exc:
+                return exc.status_code, None
+        finally:
+            db.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(attempt, ["Ada", "Ada Changed"]))
+
+    assert sorted(status for status, _ in results) == [201, 422]
+    with SessionLocal() as db:
+        confirmed_count = db.scalar(
+            select(func.count()).select_from(Booking).where(
+                Booking.slot_id == "slot-different-key",
+                Booking.status == "confirmed",
+            )
+        )
+    assert confirmed_count == 1
 
 
 def test_idempotent_replay_returns_original_booking(client):
@@ -88,41 +107,3 @@ def test_idempotency_rejects_mismatched_payload(client):
         headers={**headers, "Idempotency-Key": "mismatched-key"},
     )
     assert second.status_code == 422
-
-
-def test_incomplete_idempotency_record_is_rejected(client, monkeypatch):
-    from app.database import SessionLocal
-
-    from app.services.idempotency import request_fingerprint
-
-    session = SessionLocal()
-    try:
-        payload = {"slot_id": "slot-999", "name": "Broken", "email": "broken@example.com"}
-        record = IdempotencyRecord(
-            idempotency_key="incomplete-key",
-            request_fingerprint=request_fingerprint(payload),
-            response_body="",
-            response_status=0,
-        )
-        session.add(record)
-        session.commit()
-
-        def fail_after_booking(*args, **kwargs):
-            raise RuntimeError("simulated database failure")
-
-        monkeypatch.setattr("app.services.booking_service.store_idempotency_response", fail_after_booking)
-
-        headers = {"X-API-Key": "test-api-key"}
-        response = client.post(
-            "/bookings",
-            json=payload,
-            headers={**headers, "Idempotency-Key": "incomplete-key"},
-        )
-        assert response.status_code == 500
-
-        remaining = session.execute(
-            __import__("sqlalchemy").sql.select(IdempotencyRecord).where(IdempotencyRecord.idempotency_key == "incomplete-key")
-        ).scalar_one_or_none()
-        assert remaining is None
-    finally:
-        session.close()

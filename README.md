@@ -36,11 +36,14 @@ Use the following values in `.env`:
 ```env
 ENVIRONMENT=development
 DATABASE_URL=postgresql+psycopg://username:password@localhost:5432/clinic_booking_db
+TEST_DATABASE_URL=postgresql+psycopg://username:password@localhost:5432/clinic_booking_test
 API_KEY=replace_with_a_long_random_secret
 ALLOWED_ORIGINS=http://localhost:8000,http://127.0.0.1:8000
 ```
 
-Do not commit `.env` to GitHub.
+`TEST_DATABASE_URL` must point to a dedicated PostgreSQL database that is different from `DATABASE_URL`. Create it separately (for example, `clinic_booking_test`) and use a separate Neon branch or instance for tests when testing against Neon. Never point it at the production database. The test suite refuses to start if this variable is missing, is not PostgreSQL, or resolves to the same host and database as `DATABASE_URL`.
+
+Do not commit `.env` to GitHub. `.env.example` contains placeholders only.
 
 ## Neon PostgreSQL setup
 
@@ -68,6 +71,8 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ## Run tests
+
+Set `TEST_DATABASE_URL` in `.env` to the dedicated test database before running tests. Test setup runs `alembic upgrade head` on that database, then removes only application rows there before and after each test. It never uses `drop_all()` and never runs tests against `DATABASE_URL`.
 
 ```bash
 pytest -q
